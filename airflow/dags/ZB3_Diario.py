@@ -8,23 +8,17 @@ from airflow.providers.postgres.hooks.postgres import PostgresHook
 from sqlalchemy import create_engine
 from datetime import datetime, timedelta
 
-# Define a DAG com agendamento e configurações específicas.
 @dag(
     schedule='0 22 * * *',
     start_date=pendulum.datetime(2023, 12, 1),
     catchup=False,
-    tags=["b3_reload"],
+    tags=["B3_Diario"],
 )
 
-# DAG para o processamento retroativo dos dados da B3.
-def b3_reload():
-
-    # Verifica o dia da semana atual e retorna a data correspondente baseada em um formato específico.
+def B3_Diario():
     def check_day_week(type_format: str):
-        # Obtém o dia da semana atual.
         day_week = str(datetime.now().strftime("%A"))
 
-        # Mapeamento dos dias da semana para intervalos de dias.
         day_mapping = {
             "Tuesday": 1,
             "Wednesday": 1,
@@ -35,35 +29,31 @@ def b3_reload():
             "Monday": 3,
         }
 
-        # Obtém o intervalo de dias correspondente ao dia da semana atual.
         interval = day_mapping.get(day_week)
 
-        # Formatos disponíveis para a data.
         check_format = {"date": "%Y-%m-%d", "date_br": "%d%m%Y"}
-        
-        # Obtém o formato especificado para a data.
+
         date_format = check_format.get(type_format)
 
-        # Calcula e retorna a data correspondente ao dia da semana passada no formato desejado.
         return (datetime.now().date() - timedelta(days=interval)).strftime(
-            format=date_format)
-    
-    # Task que faz o download, processamento e carga dos dados da B3.
+            format=date_format
+        )
+
     @task()
-    def extract_process_day():
-        date = check_day_week(type_format="date_br")  
-        
-        print("Iniciando procedimento no dia "+str(date)+"...")  
-        
-        # URL do arquivo ZIP para baixar.
+    def extract_process():
+        date = check_day_week(type_format="date_br")
+
+        print("Iniciando procedimento no ano "+str(date)+"...")
+
+        #URL do arquivo ZIP para baixar baixar
         url = "https://bvmf.bmfbovespa.com.br/InstDados/SerHist/COTAHIST_D" + str(date) + ".ZIP"
 
-        # Download do arquivo ZIP
+        #Download do arquivo ZIP
         print("Baixando arquivo do dia " + str(date) +"...")
 
         response = requests.get(url)
 
-        # Se o response retornar o status 200, ele começa a etapa de processamento dos dados.
+        #Verificando se o download deu certo
         if response.status_code == 200:
 
             zip_file = zipfile.ZipFile(BytesIO(response.content))
@@ -74,14 +64,11 @@ def b3_reload():
 
             extracted_file_content = zip_file.read(chosen_file)
 
-            # Define o tamanho correto dos campos (específicado na documentação da B3).
             tamanho_campos=[2,8,2,12,3,12,10,3,4,13,13,13,13,13,13,13,5,18,18,13,1,8,7,13,12,3]
-            
-            # Adiciona o arquivo TXT em um dataframe chamado dados_acoes.
+
             dados_acoes = pd.read_fwf(BytesIO(extracted_file_content), widths=tamanho_campos, header=0)
-            
-            # Define as colunas no dataframe.
-            dados_acoes.columns = [    
+
+            dados_acoes.columns = [
             "tipo_registro",
             "data_pregao",
             "cod_bdi",
@@ -109,11 +96,11 @@ def b3_reload():
             "cod_isin",
             "num_distribuicao_papel"
             ]
-            
+
             linha=len(dados_acoes["data_pregao"])
             dados_acoes=dados_acoes.drop(linha-1)
 
-            # Ajustando valores com vírgula
+            #Ajustando valores com vírgula
             listaVirgula=[
             "preco_abertura",
             "preco_maximo",
@@ -130,40 +117,33 @@ def b3_reload():
             for coluna in listaVirgula:
                 dados_acoes[coluna]=[i/100. for i in dados_acoes[coluna]]
 
-            # Ajustando a coluna 'data_pregao' para o tipo Date.
             dados_acoes['data_pregao'] = pd.to_datetime(dados_acoes.data_pregao)
             dados_acoes['data_pregao'] = dados_acoes['data_pregao'].dt.strftime('%Y-%m-%d')
-
-            # Ajustando algumas colunas para o tipo Int.
             dados_acoes[['cod_bdi','fator_cotacao', 'numero_negocios', 'quantidade_papeis_negociados', 'volume_total_negociado', 'preco_exercicio_pontos', 'num_distribuicao_papel']] \
                 = dados_acoes[['cod_bdi', 'fator_cotacao', 'numero_negocios', 'quantidade_papeis_negociados', 'volume_total_negociado', 'preco_exercicio_pontos', 'num_distribuicao_papel']].astype(int)
-            
+
             zip_file.close()
             print(f"Dia {date} Concluído")
             print(dados_acoes)
         else:
             print(f"Falha ao baixar o arquivo ")
 
-        # Define variáveis para realizar a conexão com o banco.
         hook = PostgresHook(postgres_conn_id='postgres-airflow')
         conn = hook.get_conn()
         cur = conn.cursor()
         try:
-            # Estabelece conexão com o banco de dados PostgreSQL e carrega os dados na tabela 'stage'
-            engine = create_engine("postgresql+psycopg2://airflow:airflow@host.docker.internal/airflow")
+            engine = create_engine("postgresql+psycopg2://airflow:airflow@postgres/airflow")
             dados_acoes.to_sql(name='stage', con=engine, if_exists='append', index=False)
             conn.commit()
             cur.close()
         except Exception as e:
             print(e)
-    
-    # Tarefa que recria as estruturas das tabelas dimensões e tabela fato.
+
     @task()
-    def recreateTables():
+    def createTables():
         hook = PostgresHook(postgres_conn_id='postgres-airflow')
         conn = hook.get_conn()
         cur = conn.cursor()
-        # Se existir, deleta as tabelas especificadas em cascata (excluindo as relações).
         cur.execute("""
                     DROP TABLE IF EXISTS dim_tipo_mercado CASCADE;
                     DROP TABLE IF EXISTS dim_empresas CASCADE;
@@ -172,71 +152,63 @@ def b3_reload():
                     DROP TABLE IF EXISTS fato_pregao CASCADE;
                     """)
         conn.commit()
-        # Cria a estrutura da tabela dimensão dim_tipo_mercado.
         cur.execute("""
             CREATE TABLE dim_tipo_mercado (
-                tipo_mercado bigint PRIMARY KEY, 
+                tipo_mercado bigint PRIMARY KEY,
                 desc_tipo_mercado varchar(255)
             )
-        """)    
-        conn.commit()
-        # Cria a estrutura da tabela dimensão dim_empresas.
-        cur.execute("""
-            CREATE TABLE dim_empresas (
-                cod_negociacao varchar(255) primary key, 
-                nome_empresa varchar(255) 
-            ) 
         """)
         conn.commit()
-        # Cria a estrutura da tabela dimensão dim_papeis.
         cur.execute("""
-            CREATE TABLE dim_papeis (
-                especificacao_papel varchar(255) primary key, 
-                num_distribuicao_papel bigint, 
-                cod_isin varchar(255) 
+            CREATE TABLE dim_empresas (
+                cod_negociacao varchar(255) primary key,
+                nome_empresa varchar(255)
             )
         """)
         conn.commit()
-        # Cria a estrutura da tabela dimensão dim_cod_bdi.
+        cur.execute("""
+            CREATE TABLE dim_papeis (
+                especificacao_papel varchar(255) primary key,
+                num_distribuicao_papel bigint,
+                cod_isin varchar(255)
+            )
+        """)
         cur.execute("""
             CREATE TABLE dim_cod_bdi (
-                cod_bdi bigint primary key, 
+                cod_bdi bigint primary key,
                 desc_cod_bdi varchar(255)
             )
         """)
         conn.commit()
-        # Cria a estrutura da tabela fato fato_pregao.
         cur.execute("""
             CREATE TABLE fato_pregao (
                 id_pregao bigint primary key,
                 cod_bdi bigint REFERENCES dim_cod_bdi(cod_bdi),
                 tipo_mercado bigint REFERENCES dim_tipo_mercado(tipo_mercado),
-                cod_negociacao varchar(255) REFERENCES dim_empresas(cod_negociacao), 
-                especificacao_papel varchar(255) REFERENCES dim_papeis(especificacao_papel), 
-                data_pregao date, 
-                preco_melhor_oferta_compra decimal, 
-                preco_melhor_oferta_venda decimal, 
-                moeda_referencia varchar(255), 
-                numero_negocios bigint, 
-                preco_abertura decimal,  
-                preco_maximo decimal, 
-                preco_medio decimal, 
-                preco_minimo decimal, 
+                cod_negociacao varchar(255) REFERENCES dim_empresas(cod_negociacao),
+                especificacao_papel varchar(255) REFERENCES dim_papeis(especificacao_papel),
+                data_pregao date,
+                preco_melhor_oferta_compra decimal,
+                preco_melhor_oferta_venda decimal,
+                moeda_referencia varchar(255),
+                numero_negocios bigint,
+                preco_abertura decimal,
+                preco_maximo decimal,
+                preco_medio decimal,
+                preco_minimo decimal,
                 preco_ultimo_negocio decimal,
-                tipo_registro bigint, 
+                tipo_registro bigint,
                 volume_total_negociado bigint
             )
         """)
         conn.commit()
         cur.close()
 
-    # Tarefa que irá inserir os dados nas tabelas criadas de acordo com a tabela 'stage'.
     @task()
-    def reLoad():
+    def load():
         hook = PostgresHook(postgres_conn_id='postgres-airflow')
         conn = hook.get_conn()
         cur = conn.cursor()
-        # Faz inserção na tabela dimensão dim_tipo_mercado utilizando o 'DISTINCT' para pegar remover duplicatas.    
         cur.execute("""
             INSERT INTO dim_tipo_mercado (
                 SELECT DISTINCT tipo_mercado,
@@ -255,10 +227,10 @@ def b3_reload():
                     END AS desc_tipo_mercado
                 FROM stage
             )
+            ON CONFLICT (tipo_mercado) DO NOTHING
         """)
         conn.commit()
-        
-        # Faz inserção na tabela dimensão dim_empresas utilizando o 'DISTINCT' para pegar remover duplicatas.
+
         cur.execute("""
             INSERT INTO dim_empresas (cod_negociacao, nome_empresa)
             SELECT DISTINCT cod_negociacao, nome_empresa
@@ -267,16 +239,14 @@ def b3_reload():
         """)
         conn.commit()
 
-        # Faz inserção na tabela dimensão dim_papeis utilizando o 'DISTINCT' para pegar remover duplicatas.
         cur.execute("""
             INSERT INTO dim_papeis(especificacao_papel, num_distribuicao_papel, cod_isin)
-            SELECT DISTINCT especificacao_papel, num_distribuicao_papel, cod_isin 
+            SELECT DISTINCT especificacao_papel, num_distribuicao_papel, cod_isin
             FROM stage
             ON CONFLICT DO NOTHING
         """)
         conn.commit()
 
-        # Faz inserção na tabela dimensão dim_cod_bdi utilizando o 'DISTINCT' para pegar remover duplicatas.
         cur.execute("""
             INSERT INTO dim_cod_bdi (cod_bdi, desc_cod_bdi)
             SELECT DISTINCT cod_bdi,
@@ -327,49 +297,47 @@ def b3_reload():
                     ELSE NULL
                 END AS desc_cod_bdi
             FROM stage
+            ON CONFLICT (cod_bdi) DO NOTHING
         """)
         conn.commit()
 
-        # Faz inserção na tabela fato fato_pregao, selecionando as tabelas para compôr a tabela.
         cur.execute("""
             INSERT INTO fato_pregao(
-                id_pregao, cod_bdi, tipo_mercado, cod_negociacao, especificacao_papel, data_pregao, preco_melhor_oferta_compra, 
-                preco_melhor_oferta_venda, moeda_referencia, numero_negocios, preco_abertura, preco_maximo, preco_medio, preco_minimo, 
+                id_pregao, cod_bdi, tipo_mercado, cod_negociacao, especificacao_papel, data_pregao, preco_melhor_oferta_compra,
+                preco_melhor_oferta_venda, moeda_referencia, numero_negocios, preco_abertura, preco_maximo, preco_medio, preco_minimo,
                 preco_ultimo_negocio, tipo_registro, volume_total_negociado
             )
             SELECT
                 s.id_pregao,
-                dc.cod_bdi, 
+                dc.cod_bdi,
                 dtm.tipo_mercado,
-                de.cod_negociacao, 
-                dp.especificacao_papel,  
-                s.data_pregao, 
-                s.preco_melhor_oferta_compra, 
+                de.cod_negociacao,
+                dp.especificacao_papel,
+                s.data_pregao,
+                s.preco_melhor_oferta_compra,
                 s.preco_melhor_oferta_venda,
-                s.moeda_referencia, 
-                s.numero_negocios, 
-                s.preco_abertura,  
-                s.preco_maximo, 
-                s.preco_medio, 
-                s.preco_minimo, 
-                s.preco_ultimo_negocio, 
-                s.tipo_registro, 
-                s.volume_total_negociado 
+                s.moeda_referencia,
+                s.numero_negocios,
+                s.preco_abertura,
+                s.preco_maximo,
+                s.preco_medio,
+                s.preco_minimo,
+                s.preco_ultimo_negocio,
+                s.tipo_registro,
+                s.volume_total_negociado
             FROM stage s
             JOIN dim_cod_bdi dc ON s.cod_bdi = dc.cod_bdi
             JOIN dim_tipo_mercado dtm ON s.tipo_mercado = dtm.tipo_mercado
             JOIN dim_empresas de ON s.cod_negociacao = de.cod_negociacao
             JOIN dim_papeis dp ON s.especificacao_papel = dp.especificacao_papel
+            ON CONFLICT (id_pregao) DO NOTHING
         """)
         conn.commit()
-        cur.close()  
+        cur.close()
 
-    # Define variáveis para a chamada das funções criadas.
-    recreateTables1 = recreateTables()
-    extract_process_day1 = extract_process_day()
-    reLoad1 = reLoad()
+    createTables1 = createTables()
+    extract_process1 = extract_process()
+    load1 = load()
 
-    # Define a ordem em que as Tasks serão executadas.
-    recreateTables1 >> extract_process_day1 >> reLoad1
-
-b3_reload()
+    createTables1 >> extract_process1 >> load1 >> []
+B3_Diario()
