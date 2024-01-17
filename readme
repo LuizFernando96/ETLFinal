@@ -1,0 +1,9 @@
+Atividades
+
+O trabalho consiste em criar um pipeline de ingestão de dados usando técnicas de ETL. O trabalho deverá usar o Apache Airflow para gerenciar as rotinas de ETL. O resultado da extração deve ser mantido em stage para transformação e enriquecimento da informação. Após passar pela stage você deve criar um uma estrela com dimensões e fatos dentro de uma área corporativa.
+
+Todo o código deve estar no github pessoal do aluno. Os arquivos devem ser mantidos em banco de dados a escolha do do aluno. Para a prova real deve ser enviado um vídeo com o banco de dados com os dados com pelo menos 5 consultas.
+
+A carga de dados deve prever fazer uma carga de pelo menos 5 anos de dados e disponibilizados pela B3.
+
+Também deve ser feito uma carga para atualização diária dos dados e das cotações na B3.
